@@ -11,8 +11,10 @@
     "build": "turbo run build",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
     "db:generate": "pnpm --filter @sera/db generate",
     "db:migrate": "pnpm --filter @sera/db migrate",
+    "db:seed": "pnpm --filter @sera/db seed",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\""
   },
   "devDependencies": {
