@@ -7,3 +7,7 @@ allowBuilds:
   msgpackr-extract: true
   sharp: true
   unrs-resolver: true
+
+minimumReleaseAgeExclude:
+  - '@ai-sdk/gateway@4.0.37'
+  - ai@7.0.48
