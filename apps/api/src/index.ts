@@ -8,7 +8,7 @@ import {
   type ProgressEvent,
   type ProgressStage,
 } from "@sera/core";
-import { auditJobs, db } from "@sera/db";
+import { auditJobs, db, lineItems } from "@sera/db";
 import { Queue } from "bullmq";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -44,12 +44,16 @@ app.post("/api/audits", async (c) => {
   return c.json({ jobId: job.id });
 });
 
-// Fetch a job (status + findings).
+// Fetch a job (status + findings + parsed line items).
 app.get("/api/audits/:id", async (c) => {
   const id = c.req.param("id");
   const [job] = await db.select().from(auditJobs).where(eq(auditJobs.id, id));
   if (!job) return c.json({ error: "not found" }, 404);
-  return c.json(job);
+  const items = await db
+    .select()
+    .from(lineItems)
+    .where(eq(lineItems.jobId, id));
+  return c.json({ ...job, lineItems: items });
 });
 
 // Stream live progress via SSE (backed by Redis pub/sub from the worker).

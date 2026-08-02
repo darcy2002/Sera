@@ -16,15 +16,26 @@ const STAGE_LABEL: Record<string, string> = {
 
 type Phase = "idle" | "running" | "done" | "error";
 
+type LineRow = {
+  id: string;
+  code: string;
+  description: string;
+  units: number;
+  charge: number;
+  serviceDate: string | null;
+  patientCharge: number | null;
+};
+
+type Result = Pick<AuditResult, "findings" | "totalOvercharge"> & {
+  lineItems: LineRow[];
+};
+
 export default function Home() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState<string>("queued");
   const [log, setLog] = useState<string[]>([]);
-  const [result, setResult] = useState<Pick<
-    AuditResult,
-    "findings" | "totalOvercharge"
-  > | null>(null);
+  const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
@@ -64,13 +75,20 @@ export default function Home() {
         if (evt.stage === "done") {
           void fetch(`${API}/api/audits/${jobId}`)
             .then((r) => r.json())
-            .then((row: { findings: Finding[]; totalOvercharge: number }) => {
-              setResult({
-                findings: row.findings,
-                totalOvercharge: row.totalOvercharge,
-              });
-              setPhase("done");
-            });
+            .then(
+              (row: {
+                findings: Finding[];
+                totalOvercharge: number;
+                lineItems: LineRow[];
+              }) => {
+                setResult({
+                  findings: row.findings,
+                  totalOvercharge: row.totalOvercharge,
+                  lineItems: row.lineItems ?? [],
+                });
+                setPhase("done");
+              },
+            );
           es.close();
         } else if (evt.stage === "error") {
           setError(evt.message);
@@ -104,9 +122,9 @@ export default function Home() {
             Find the errors in your medical bill.
           </h1>
           <p className="max-w-prose text-neutral-400">
-            Upload an itemized bill and Sera extracts every line item, checks it
-            for overcharges and duplicates, and drafts an appeal. This is a live
-            skeleton — the analysis below is simulated end-to-end.
+            Upload an itemized bill and Sera checks every line against Medicare
+            rates and your EOB for duplicates, overcharges, and balance billing
+            — then drafts an appeal. Try it on a sample bill below.
           </p>
         </header>
 
@@ -187,6 +205,49 @@ export default function Home() {
                 </li>
               ))}
             </ul>
+
+            {result.lineItems.length > 0 && (
+              <details className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
+                <summary className="cursor-pointer text-sm font-medium text-neutral-300">
+                  Parsed bill · {result.lineItems.length} line items
+                </summary>
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-neutral-500">
+                      <tr className="border-b border-neutral-800">
+                        <th className="py-2 pr-4 font-mono text-xs font-normal">
+                          CODE
+                        </th>
+                        <th className="py-2 pr-4 font-normal">Description</th>
+                        <th className="py-2 pr-4 text-right font-normal">
+                          Units
+                        </th>
+                        <th className="py-2 text-right font-normal">Charge</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-neutral-300">
+                      {result.lineItems.map((li) => (
+                        <tr
+                          key={li.id}
+                          className="border-b border-neutral-800/60"
+                        >
+                          <td className="py-2 pr-4 font-mono text-xs text-neutral-400">
+                            {li.code}
+                          </td>
+                          <td className="py-2 pr-4">{li.description}</td>
+                          <td className="py-2 pr-4 text-right tabular-nums">
+                            {li.units}
+                          </td>
+                          <td className="py-2 text-right tabular-nums">
+                            {usd(li.charge)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
 
             <button
               onClick={reset}
