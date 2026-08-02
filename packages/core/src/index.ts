@@ -71,3 +71,53 @@ export interface AuditJobData {
 /** Redis pub/sub channel carrying progress events for a given job. */
 export const progressChannel = (jobId: string): string =>
   `audit:progress:${jobId}`;
+
+// ---- Structured bill (input to the rule engine) ----
+
+/** One line on an itemized medical bill. */
+export interface LineItem {
+  id: string;
+  /** CPT / HCPCS procedure code, e.g. "99284". */
+  code: string;
+  description: string;
+  /** Number of units billed (usually 1). */
+  units: number;
+  /** Charge per unit, if the bill itemizes it. */
+  unitCharge?: number;
+  /** Total charge for the line (USD). */
+  charge: number;
+  /** ISO date of service, e.g. "2026-05-14". */
+  serviceDate: string;
+  /** Amount the provider is billing the patient for this line, if known. */
+  patientCharge?: number;
+}
+
+/** One line from an insurer's Explanation of Benefits (EOB). */
+export interface EobLine {
+  code: string;
+  /** What the provider billed. */
+  billed: number;
+  /** What the insurer allows for the code. */
+  allowedAmount: number;
+  /** What the patient is actually responsible for per the EOB. */
+  patientResponsibility: number;
+}
+
+// ---- Rule engine contract ----
+
+/** Everything a rule needs to evaluate a bill. Pure data, no I/O. */
+export interface RuleContext {
+  lineItems: LineItem[];
+  eobLines: EobLine[];
+  /** code → Medicare national rate (USD). */
+  medicareRates: Map<string, number>;
+}
+
+/** A rule is a pure function from a bill to zero or more findings. */
+export type Rule = (ctx: RuleContext) => Finding[];
+
+/**
+ * Charges above this multiple of the Medicare rate are flagged as
+ * unreasonable. 3× is a common patient-advocate threshold. Tunable.
+ */
+export const FAIR_PRICE_MULTIPLE = 3;
