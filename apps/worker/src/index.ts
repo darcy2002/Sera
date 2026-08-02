@@ -1,15 +1,22 @@
 import "./env.js"; // must be first: loads .env before @sera/db reads DATABASE_URL
 
-import { randomUUID } from "node:crypto";
 import {
   AUDIT_QUEUE,
   progressChannel,
+  runAudit,
+  sampleEobLines,
+  sampleLineItems,
   type AuditJobData,
-  type Finding,
   type ProgressEvent,
   type ProgressStage,
 } from "@sera/core";
-import { auditJobs, db } from "@sera/db";
+import {
+  auditJobs,
+  db,
+  eobLines,
+  lineItems,
+  medicareRates,
+} from "@sera/db";
 import { Worker } from "bullmq";
 import { eq } from "drizzle-orm";
 import IORedis from "ioredis";
@@ -19,6 +26,11 @@ const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 const publisher = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const usd = (n: number) =>
+  `$${n.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 
 async function publish(
   jobId: string,
@@ -36,45 +48,6 @@ async function publish(
   await publisher.publish(progressChannel(jobId), JSON.stringify(evt));
 }
 
-/**
- * Placeholder findings so the UI has something real-shaped to render.
- * Phase 2 (extraction) + Phase 3 (rule engine) replace this entirely.
- */
-function dummyFindings(): Finding[] {
-  return [
-    {
-      id: randomUUID(),
-      type: "duplicate_charge",
-      title: "Duplicate metabolic panel (CPT 80053)",
-      explanation:
-        "A comprehensive metabolic panel was billed twice on the same date of service.",
-      estimatedOvercharge: 120,
-      confidence: 0.92,
-      source: "rule",
-    },
-    {
-      id: randomUUID(),
-      type: "above_fair_price",
-      title: "ER visit billed 3.2× the Medicare rate (CPT 99284)",
-      explanation:
-        "Charged $612 versus a Medicare reference of ~$190 for the same code.",
-      estimatedOvercharge: 180,
-      confidence: 0.7,
-      source: "rule",
-    },
-    {
-      id: randomUUID(),
-      type: "eob_mismatch",
-      title: "Balance billed beyond EOB patient responsibility",
-      explanation:
-        "The provider billed $40 more than the patient-responsibility amount on the insurer's EOB.",
-      estimatedOvercharge: 40,
-      confidence: 0.8,
-      source: "rule",
-    },
-  ];
-}
-
 const worker = new Worker<AuditJobData>(
   AUDIT_QUEUE,
   async (job) => {
@@ -85,26 +58,64 @@ const worker = new Worker<AuditJobData>(
       .set({ status: "processing", updatedAt: new Date() })
       .where(eq(auditJobs.id, jobId));
 
-    await publish(jobId, "parsing", "Reading the bill…", 0.2);
-    await sleep(700);
-    await publish(jobId, "parsing", "Parsed 14 line items", 0.35);
+    // Phase 3: uploads aren't extracted yet, so every job audits the synthetic
+    // sample bill. Phase 2 will replace this with OCR/LLM-extracted line items.
+    const bill = sampleLineItems;
+    const eob = sampleEobLines;
+
+    await publish(jobId, "parsing", "Reading the itemized bill…", 0.2);
     await sleep(500);
-    await publish(jobId, "checking", "Checking duplicates & unbundling…", 0.55);
-    await sleep(700);
-    await publish(jobId, "checking", "Comparing charges to Medicare rates…", 0.7);
-    await sleep(700);
-    await publish(jobId, "scoring", "Scoring findings…", 0.9);
+    await publish(jobId, "parsing", `Parsed ${bill.length} line items`, 0.35);
+
+    // Persist the parsed bill.
+    await db
+      .insert(lineItems)
+      .values(
+        bill.map((li) => ({
+          jobId,
+          code: li.code,
+          description: li.description,
+          units: li.units,
+          unitCharge: li.unitCharge ?? null,
+          charge: li.charge,
+          serviceDate: li.serviceDate,
+          patientCharge: li.patientCharge ?? null,
+        })),
+      );
+    if (eob.length > 0) {
+      await db.insert(eobLines).values(eob.map((e) => ({ jobId, ...e })));
+    }
+
+    await publish(jobId, "checking", "Loading Medicare reference rates…", 0.5);
+    const rateRows = await db
+      .select({ code: medicareRates.code, rate: medicareRates.nationalRate })
+      .from(medicareRates);
+    const rates = new Map(rateRows.map((r) => [r.code, r.rate]));
+    await sleep(400);
+
+    await publish(
+      jobId,
+      "checking",
+      "Checking duplicates, fair price, and EOB…",
+      0.7,
+    );
     await sleep(500);
 
-    const findings = dummyFindings();
-    const total = findings.reduce((s, f) => s + f.estimatedOvercharge, 0);
+    const { findings, totalOvercharge } = runAudit({
+      lineItems: bill,
+      eobLines: eob,
+      medicareRates: rates,
+    });
+
+    await publish(jobId, "scoring", "Scoring findings…", 0.9);
+    await sleep(300);
 
     await db
       .update(auditJobs)
       .set({
         status: "done",
         findings,
-        totalOvercharge: total,
+        totalOvercharge,
         updatedAt: new Date(),
       })
       .where(eq(auditJobs.id, jobId));
@@ -112,7 +123,7 @@ const worker = new Worker<AuditJobData>(
     await publish(
       jobId,
       "done",
-      `Found $${total} across ${findings.length} issues`,
+      `Found ${usd(totalOvercharge)} across ${findings.length} issues`,
       1,
     );
   },
