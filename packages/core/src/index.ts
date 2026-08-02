@@ -123,3 +123,7 @@ export { runAudit, type AuditOutcome } from "./rules/engine.js";
 export { duplicateRule } from "./rules/duplicate.js";
 export { fairPriceRule } from "./rules/fairPrice.js";
 export { eobMismatchRule } from "./rules/eobMismatch.js";
+
+// ---- Fixtures (demo + tests) ----
+
+export { sampleLineItems, sampleEobLines } from "./fixtures/sampleBill.js";

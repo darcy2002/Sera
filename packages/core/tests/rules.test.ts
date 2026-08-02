@@ -4,6 +4,8 @@ import {
   eobMismatchRule,
   fairPriceRule,
   runAudit,
+  sampleEobLines,
+  sampleLineItems,
   type EobLine,
   type LineItem,
   type RuleContext,
@@ -135,5 +137,31 @@ describe("runAudit", () => {
     // sorted by estimatedOvercharge desc
     expect(out.findings[0]!.estimatedOvercharge).toBe(1230);
     expect(out.findings.at(-1)!.estimatedOvercharge).toBe(90);
+  });
+});
+
+describe("sample fixture", () => {
+  const medicareRates = new Map<string, number>([
+    ["99284", 190],
+    ["70450", 110],
+    ["71046", 30],
+    ["85025", 11],
+    ["93000", 18],
+    ["36415", 3],
+  ]);
+
+  it("produces exactly the three intended findings", () => {
+    const out = runAudit({
+      lineItems: sampleLineItems,
+      eobLines: sampleEobLines,
+      medicareRates,
+    });
+    expect(out.findings.map((f) => f.type).sort()).toEqual([
+      "above_fair_price",
+      "duplicate_charge",
+      "eob_mismatch",
+    ]);
+    // 1280 (fair) + 300 (dup) + 65 (eob)
+    expect(out.totalOvercharge).toBe(1645);
   });
 });
