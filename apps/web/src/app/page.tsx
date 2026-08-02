@@ -50,60 +50,92 @@ export default function Home() {
     setError(null);
   }, []);
 
-  const start = useCallback(async () => {
+  const subscribe = useCallback((jobId: string) => {
+    const es = new EventSource(`${API}/api/audits/${jobId}/stream`);
+    esRef.current = es;
+
+    es.addEventListener("progress", (e) => {
+      const evt = JSON.parse((e as MessageEvent).data) as ProgressEvent;
+      setStage(evt.stage);
+      setProgress(evt.progress);
+      setLog((prev) =>
+        prev[prev.length - 1] === evt.message ? prev : [...prev, evt.message],
+      );
+
+      if (evt.stage === "done") {
+        void fetch(`${API}/api/audits/${jobId}`)
+          .then((r) => r.json())
+          .then(
+            (row: {
+              findings: Finding[];
+              totalOvercharge: number;
+              lineItems: LineRow[];
+            }) => {
+              setResult({
+                findings: row.findings,
+                totalOvercharge: row.totalOvercharge,
+                lineItems: row.lineItems ?? [],
+              });
+              setPhase("done");
+            },
+          );
+        es.close();
+      } else if (evt.stage === "error") {
+        setError(evt.message);
+        setPhase("error");
+        es.close();
+      }
+    });
+
+    es.addEventListener("end", () => es.close());
+    es.onerror = () => es.close();
+  }, []);
+
+  const startSample = useCallback(async () => {
     reset();
     setPhase("running");
     try {
       const res = await fetch(`${API}/api/audits`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source: "sample" }),
+        body: JSON.stringify({}),
       });
       const { jobId } = (await res.json()) as { jobId: string };
-
-      const es = new EventSource(`${API}/api/audits/${jobId}/stream`);
-      esRef.current = es;
-
-      es.addEventListener("progress", (e) => {
-        const evt = JSON.parse((e as MessageEvent).data) as ProgressEvent;
-        setStage(evt.stage);
-        setProgress(evt.progress);
-        setLog((prev) =>
-          prev[prev.length - 1] === evt.message ? prev : [...prev, evt.message],
-        );
-
-        if (evt.stage === "done") {
-          void fetch(`${API}/api/audits/${jobId}`)
-            .then((r) => r.json())
-            .then(
-              (row: {
-                findings: Finding[];
-                totalOvercharge: number;
-                lineItems: LineRow[];
-              }) => {
-                setResult({
-                  findings: row.findings,
-                  totalOvercharge: row.totalOvercharge,
-                  lineItems: row.lineItems ?? [],
-                });
-                setPhase("done");
-              },
-            );
-          es.close();
-        } else if (evt.stage === "error") {
-          setError(evt.message);
-          setPhase("error");
-          es.close();
-        }
-      });
-
-      es.addEventListener("end", () => es.close());
-      es.onerror = () => es.close();
+      subscribe(jobId);
     } catch {
       setError("Could not reach the audit API. Is it running on :8787?");
       setPhase("error");
     }
-  }, [reset]);
+  }, [reset, subscribe]);
+
+  const startUpload = useCallback(
+    async (file: File) => {
+      reset();
+      setPhase("running");
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch(`${API}/api/audits`, {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          throw new Error(body.error ?? "Upload failed.");
+        }
+        const { jobId } = (await res.json()) as { jobId: string };
+        subscribe(jobId);
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Could not upload the file.",
+        );
+        setPhase("error");
+      }
+    },
+    [reset, subscribe],
+  );
 
   const usd = (n: number) =>
     n.toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -129,12 +161,20 @@ export default function Home() {
         </header>
 
         {phase === "idle" && (
-          <button
-            onClick={() => void start()}
-            className="w-fit rounded-lg bg-emerald-500 px-5 py-3 font-medium text-emerald-950 transition hover:bg-emerald-400"
-          >
-            Audit sample bill →
-          </button>
+          <div className="flex flex-col gap-4">
+            <UploadZone onFile={(f) => void startUpload(f)} />
+            <div className="flex items-center gap-3 text-xs text-neutral-600">
+              <span className="h-px flex-1 bg-neutral-800" />
+              or
+              <span className="h-px flex-1 bg-neutral-800" />
+            </div>
+            <button
+              onClick={() => void startSample()}
+              className="w-fit rounded-lg bg-emerald-500 px-5 py-3 font-medium text-emerald-950 transition hover:bg-emerald-400"
+            >
+              Try it on a sample bill →
+            </button>
+          </div>
         )}
 
         {(phase === "running" || phase === "done" || phase === "error") && (
@@ -259,6 +299,46 @@ export default function Home() {
         )}
       </div>
     </main>
+  );
+}
+
+function UploadZone({ onFile }: { onFile: (f: File) => void }) {
+  const [drag, setDrag] = useState(false);
+  return (
+    <label
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDrag(true);
+      }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDrag(false);
+        const f = e.dataTransfer.files?.[0];
+        if (f) onFile(f);
+      }}
+      className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed px-6 py-10 text-center transition ${
+        drag
+          ? "border-emerald-500 bg-emerald-950/20"
+          : "border-neutral-700 bg-neutral-900/40 hover:border-neutral-600"
+      }`}
+    >
+      <span className="text-sm font-medium text-neutral-200">
+        Drop a bill here, or click to upload
+      </span>
+      <span className="text-xs text-neutral-500">
+        PDF, PNG, or JPG · up to 10MB
+      </span>
+      <input
+        type="file"
+        accept="application/pdf,image/png,image/jpeg,image/webp"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onFile(f);
+        }}
+      />
+    </label>
   );
 }
 
