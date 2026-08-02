@@ -7,6 +7,8 @@ import {
   sampleEobLines,
   sampleLineItems,
   type AuditJobData,
+  type EobLine,
+  type LineItem,
   type ProgressEvent,
   type ProgressStage,
 } from "@sera/core";
@@ -17,6 +19,8 @@ import {
   lineItems,
   medicareRates,
 } from "@sera/db";
+import { extractBill } from "@sera/llm";
+import { mediaTypeForRef, readUpload } from "@sera/storage";
 import { Worker } from "bullmq";
 import { eq } from "drizzle-orm";
 import IORedis from "ioredis";
@@ -48,30 +52,63 @@ async function publish(
   await publisher.publish(progressChannel(jobId), JSON.stringify(evt));
 }
 
+interface Bill {
+  lineItems: LineItem[];
+  eobLines: EobLine[];
+}
+
+/** Obtain a structured bill: extract from the upload, or use the sample. */
+async function loadBill(
+  jobId: string,
+  source: string,
+  fileRef: string | null,
+): Promise<Bill> {
+  if (source === "upload" && fileRef) {
+    await publish(jobId, "parsing", "Reading the document…", 0.15);
+    const bytes = await readUpload(fileRef);
+    await publish(jobId, "parsing", "Extracting line items with AI…", 0.35);
+    try {
+      return await extractBill({ data: bytes, mediaType: mediaTypeForRef(fileRef) });
+    } catch (err) {
+      throw new Error(
+        "Couldn't read that document — please upload a clear PDF or photo of an itemized bill.",
+        { cause: err },
+      );
+    }
+  }
+  await publish(jobId, "parsing", "Reading the itemized bill…", 0.2);
+  await sleep(400);
+  return { lineItems: sampleLineItems, eobLines: sampleEobLines };
+}
+
 const worker = new Worker<AuditJobData>(
   AUDIT_QUEUE,
   async (job) => {
     const { jobId } = job.data;
+
+    const [row] = await db
+      .select()
+      .from(auditJobs)
+      .where(eq(auditJobs.id, jobId));
+    if (!row) throw new Error(`audit job ${jobId} not found`);
 
     await db
       .update(auditJobs)
       .set({ status: "processing", updatedAt: new Date() })
       .where(eq(auditJobs.id, jobId));
 
-    // Phase 3: uploads aren't extracted yet, so every job audits the synthetic
-    // sample bill. Phase 2 will replace this with OCR/LLM-extracted line items.
-    const bill = sampleLineItems;
-    const eob = sampleEobLines;
-
-    await publish(jobId, "parsing", "Reading the itemized bill…", 0.2);
-    await sleep(500);
-    await publish(jobId, "parsing", `Parsed ${bill.length} line items`, 0.35);
+    const bill = await loadBill(jobId, row.source, row.fileRef);
+    await publish(
+      jobId,
+      "parsing",
+      `Parsed ${bill.lineItems.length} line items`,
+      0.45,
+    );
 
     // Persist the parsed bill.
-    await db
-      .insert(lineItems)
-      .values(
-        bill.map((li) => ({
+    if (bill.lineItems.length > 0) {
+      await db.insert(lineItems).values(
+        bill.lineItems.map((li) => ({
           jobId,
           code: li.code,
           description: li.description,
@@ -82,33 +119,33 @@ const worker = new Worker<AuditJobData>(
           patientCharge: li.patientCharge ?? null,
         })),
       );
-    if (eob.length > 0) {
-      await db.insert(eobLines).values(eob.map((e) => ({ jobId, ...e })));
+    }
+    if (bill.eobLines.length > 0) {
+      await db.insert(eobLines).values(bill.eobLines.map((e) => ({ jobId, ...e })));
     }
 
-    await publish(jobId, "checking", "Loading Medicare reference rates…", 0.5);
+    await publish(jobId, "checking", "Loading Medicare reference rates…", 0.6);
     const rateRows = await db
       .select({ code: medicareRates.code, rate: medicareRates.nationalRate })
       .from(medicareRates);
     const rates = new Map(rateRows.map((r) => [r.code, r.rate]));
-    await sleep(400);
 
     await publish(
       jobId,
       "checking",
       "Checking duplicates, fair price, and EOB…",
-      0.7,
+      0.75,
     );
-    await sleep(500);
+    await sleep(300);
 
     const { findings, totalOvercharge } = runAudit({
-      lineItems: bill,
-      eobLines: eob,
+      lineItems: bill.lineItems,
+      eobLines: bill.eobLines,
       medicareRates: rates,
     });
 
     await publish(jobId, "scoring", "Scoring findings…", 0.9);
-    await sleep(300);
+    await sleep(200);
 
     await db
       .update(auditJobs)

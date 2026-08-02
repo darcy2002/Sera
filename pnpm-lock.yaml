@@ -109,6 +109,9 @@ importers:
       '@sera/llm':
         specifier: workspace:*
         version: link:../../packages/llm
+      '@sera/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       bullmq:
         specifier: ^5.34.6
         version: 5.81.3
