@@ -116,8 +116,10 @@ export interface RuleContext {
 /** A rule is a pure function from a bill to zero or more findings. */
 export type Rule = (ctx: RuleContext) => Finding[];
 
-/**
- * Charges above this multiple of the Medicare rate are flagged as
- * unreasonable. 3× is a common patient-advocate threshold. Tunable.
- */
-export const FAIR_PRICE_MULTIPLE = 3;
+// ---- Engine + rules (public API) ----
+
+export { FAIR_PRICE_MULTIPLE } from "./constants.js";
+export { runAudit, type AuditOutcome } from "./rules/engine.js";
+export { duplicateRule } from "./rules/duplicate.js";
+export { fairPriceRule } from "./rules/fairPrice.js";
+export { eobMismatchRule } from "./rules/eobMismatch.js";
