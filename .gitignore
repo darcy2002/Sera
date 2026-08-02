@@ -40,3 +40,6 @@ next-env.d.ts
 
 # claude local settings
 .claude/settings.local.json
+
+# local uploads (Phase 6 moves to object storage)
+.uploads/

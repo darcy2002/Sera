@@ -9,6 +9,7 @@ import {
   type ProgressStage,
 } from "@sera/core";
 import { auditJobs, db, lineItems } from "@sera/db";
+import { MEDIA_EXT, saveUpload } from "@sera/storage";
 import { Queue } from "bullmq";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -28,19 +29,59 @@ app.use("/*", cors());
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-// Create an audit job and enqueue it.
-app.post("/api/audits", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as { source?: string };
-  const source = body.source === "upload" ? "upload" : "sample";
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 
-  const [job] = await db.insert(auditJobs).values({ source }).returning();
-  if (!job) return c.json({ error: "failed to create job" }, 500);
-
+async function enqueue(jobId: string) {
   await queue.add(
     "audit",
-    { jobId: job.id },
+    { jobId },
     { removeOnComplete: true, removeOnFail: 100 },
   );
+}
+
+// Create an audit job and enqueue it. Multipart => audit an uploaded document;
+// JSON => audit the built-in sample bill.
+app.post("/api/audits", async (c) => {
+  const contentType = c.req.header("content-type") ?? "";
+
+  if (contentType.includes("multipart/form-data")) {
+    const form = await c.req.parseBody();
+    const file = form["file"];
+    if (!(file instanceof File)) {
+      return c.json({ error: "no file uploaded (field 'file')" }, 400);
+    }
+    const mediaType = file.type || "application/octet-stream";
+    if (!(mediaType in MEDIA_EXT)) {
+      return c.json({ error: `unsupported file type: ${mediaType}` }, 415);
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      return c.json({ error: "file too large (max 10MB)" }, 413);
+    }
+
+    const [job] = await db
+      .insert(auditJobs)
+      .values({ source: "upload" })
+      .returning();
+    if (!job) return c.json({ error: "failed to create job" }, 500);
+
+    const fileRef = `${job.id}.${MEDIA_EXT[mediaType]}`;
+    await saveUpload(fileRef, Buffer.from(await file.arrayBuffer()));
+    await db
+      .update(auditJobs)
+      .set({ fileRef, updatedAt: new Date() })
+      .where(eq(auditJobs.id, job.id));
+
+    await enqueue(job.id);
+    return c.json({ jobId: job.id });
+  }
+
+  // JSON path → sample bill.
+  const [job] = await db
+    .insert(auditJobs)
+    .values({ source: "sample" })
+    .returning();
+  if (!job) return c.json({ error: "failed to create job" }, 500);
+  await enqueue(job.id);
   return c.json({ jobId: job.id });
 });
 
